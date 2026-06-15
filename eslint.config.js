@@ -5,7 +5,15 @@ import ts from "typescript-eslint";
 
 export default defineConfig(
   {
-    ignores: ["coverage/**", "dist/**", "node_modules/**", ".direnv/**", ".vite/**", ".vitest/**"],
+    ignores: [
+      "CHANGELOG.md",
+      "coverage/**",
+      "dist/**",
+      "node_modules/**",
+      ".direnv/**",
+      ".vite/**",
+      ".vitest/**",
+    ],
   },
   js.configs.recommended,
   ts.configs.recommended,
