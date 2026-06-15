@@ -87,6 +87,12 @@ type SessionConfig<TValue> = {
   events?: EventReducers<TValue>;
 };
 
+type DeferredSessionConfig<TValue> = Omit<SessionConfig<TValue>, "topic">;
+
+type SessionAttachConfig = {
+  topic: string;
+};
+
 type SessionActionContext = {
   call<TOk = unknown, TError = unknown>(
     event: string,
@@ -102,26 +108,48 @@ type Session<TValue> = SessionStore<TValue, NoActions> & {
   ): SessionStore<TValue, ExtensionActionsOf<TExtension>> & TExtension;
 };
 
-export function session<TValue = unknown>(
-  socket: Pick<Socket, "channel">,
-  config: SessionConfig<TValue>,
-): Session<TValue> {
+type DeferredSession<TValue> = {
+  readonly session: Session<TValue>;
+  attach(socket: Pick<Socket, "channel">, config: SessionAttachConfig): void;
+  detach(): void;
+};
+
+export function defer<TValue = unknown>(
+  config: DeferredSessionConfig<TValue> = {},
+): DeferredSession<TValue> {
   let channel: Channel | null = null;
+  let attachment: { socket: Pick<Socket, "channel">; topic: string } | null = null;
+  let mounted = false;
+  let stopCurrentChannel = () => {};
   let activeActionName: string | null = null;
   let nextActionRunId = 0;
+  let nextChannelRunId = 0;
   const activeActionRunIds = new Map<string, number>();
+  const actionNames = new Set<string>();
 
-  const initialState: SessionState<TValue, RuntimeActions> = {
-    value: config.value ?? null,
-    status: "loading",
-    error: null,
-    processing: {},
-    errors: {},
-    timeouts: {},
+  const createInitialState = (): SessionState<TValue, RuntimeActions> => {
+    let processing: Record<string, boolean> = {};
+    let errors: Record<string, unknown | null> = {};
+    let timeouts: Record<string, boolean> = {};
+
+    for (const action of actionNames) {
+      processing = { ...processing, [action]: false };
+      errors = { ...errors, [action]: null };
+      timeouts = { ...timeouts, [action]: false };
+    }
+
+    return {
+      value: config.value ?? null,
+      status: "loading",
+      error: null,
+      processing,
+      errors,
+      timeouts,
+    };
   };
 
-  let currentState = initialState;
-  const $state = atom<SessionState<TValue, RuntimeActions>>(initialState);
+  let currentState = createInitialState();
+  const $state = atom<SessionState<TValue, RuntimeActions>>(currentState);
 
   const update = (
     reduce: (current: SessionState<TValue, RuntimeActions>) => SessionState<TValue, RuntimeActions>,
@@ -130,7 +158,15 @@ export function session<TValue = unknown>(
     $state.set(currentState);
   };
 
+  const reset = () => {
+    activeActionName = null;
+    activeActionRunIds.clear();
+    currentState = createInitialState();
+    $state.set(currentState);
+  };
+
   const registerAction = (action: string) => {
+    actionNames.add(action);
     update((current) => {
       if (action in current.processing && action in current.errors && action in current.timeouts) {
         return current;
@@ -147,6 +183,18 @@ export function session<TValue = unknown>(
 
   const disconnectStatus = (current: SessionState<TValue, RuntimeActions>): SessionStatus => {
     return current.status === "ready" || current.status === "stale" ? "stale" : "failed";
+  };
+
+  const assertChannel = (event: string, operation: "call" | "cast") => {
+    if (channel) {
+      return channel;
+    }
+
+    if (attachment) {
+      throw new Error(`Cannot ${operation} "${event}" before joining "${attachment.topic}"`);
+    }
+
+    throw new Error(`Cannot ${operation} "${event}" before attaching a session`);
   };
 
   const runAction = <TResult>(action: string, run: () => TResult) => {
@@ -188,20 +236,39 @@ export function session<TValue = unknown>(
     }));
   };
 
-  onMount($state, () => {
-    channel = socket.channel(config.topic, {});
-    const cleanups: Array<() => void> = [];
+  const startChannel = () => {
+    if (!mounted || !attachment) {
+      return;
+    }
 
-    const errorRef = channel.onError((reason) => {
+    stopCurrentChannel();
+
+    const channelRunId = ++nextChannelRunId;
+    const activeAttachment = attachment;
+    const activeChannel = activeAttachment.socket.channel(activeAttachment.topic, {});
+    const cleanups: Array<() => void> = [];
+    channel = activeChannel;
+
+    const isCurrentChannel = () => channel === activeChannel && channelRunId === nextChannelRunId;
+
+    const errorRef = activeChannel.onError((reason) => {
+      if (!isCurrentChannel()) {
+        return;
+      }
+
       update((current) => ({
         ...current,
         status: disconnectStatus(current),
         error: { kind: "transport_error", cause: reason },
       }));
     });
-    cleanups.push(() => channel?.off(CHANNEL_ERROR_EVENT, errorRef));
+    cleanups.push(() => activeChannel.off(CHANNEL_ERROR_EVENT, errorRef));
 
-    const closeRef = channel.onClose(() => {
+    const closeRef = activeChannel.onClose(() => {
+      if (!isCurrentChannel()) {
+        return;
+      }
+
       update((current) => ({
         ...current,
         status: disconnectStatus(current),
@@ -209,10 +276,14 @@ export function session<TValue = unknown>(
       }));
     });
 
-    cleanups.push(() => channel?.off(CHANNEL_CLOSE_EVENT, closeRef));
+    cleanups.push(() => activeChannel.off(CHANNEL_CLOSE_EVENT, closeRef));
 
     for (const [event, reducer] of Object.entries(config.events ?? {})) {
-      const ref = channel.on(event, (payload) => {
+      const ref = activeChannel.on(event, (payload) => {
+        if (!isCurrentChannel()) {
+          return;
+        }
+
         update((current) => ({
           ...current,
           value: reducer(current.value, payload),
@@ -220,12 +291,16 @@ export function session<TValue = unknown>(
           error: null,
         }));
       });
-      cleanups.push(() => channel?.off(event, ref));
+      cleanups.push(() => activeChannel.off(event, ref));
     }
 
-    channel
+    activeChannel
       .join()
       .receive("ok", (response: unknown) => {
+        if (!isCurrentChannel()) {
+          return;
+        }
+
         update((current) => ({
           ...current,
           value: config.connect?.ok ? config.connect.ok(current.value, response) : current.value,
@@ -234,6 +309,10 @@ export function session<TValue = unknown>(
         }));
       })
       .receive("error", (response: unknown) => {
+        if (!isCurrentChannel()) {
+          return;
+        }
+
         update((current) => ({
           ...current,
           status: "failed",
@@ -244,6 +323,10 @@ export function session<TValue = unknown>(
         }));
       })
       .receive("timeout", () => {
+        if (!isCurrentChannel()) {
+          return;
+        }
+
         update((current) => ({
           ...current,
           status: "failed",
@@ -254,10 +337,27 @@ export function session<TValue = unknown>(
         }));
       });
 
-    return () => {
+    stopCurrentChannel = () => {
+      nextChannelRunId += 1;
+
       for (const cleanup of cleanups) cleanup();
-      channel?.leave();
-      channel = null;
+      activeChannel.leave();
+      cleanups.length = 0;
+
+      if (channel === activeChannel) {
+        channel = null;
+      }
+    };
+  };
+
+  onMount($state, () => {
+    mounted = true;
+    startChannel();
+
+    return () => {
+      mounted = false;
+      stopCurrentChannel();
+      stopCurrentChannel = () => {};
     };
   });
 
@@ -271,11 +371,10 @@ export function session<TValue = unknown>(
 
   const actionContext: SessionActionContext = {
     call: <TOk = unknown, TError = unknown>(event: string, payload: object, timeout?: number) => {
-      if (!channel) {
-        throw new Error(`Cannot call "${event}" before joining "${config.topic}"`);
-      }
-
-      const call = channel.push(event, payload, timeout) as ActionCall<TOk, TError>;
+      const call = assertChannel(event, "call").push(event, payload, timeout) as ActionCall<
+        TOk,
+        TError
+      >;
       const action = activeActionName ?? event;
       const runId = startCall(action);
 
@@ -305,11 +404,7 @@ export function session<TValue = unknown>(
       return call;
     },
     cast: (event: string, payload: object) => {
-      if (!channel) {
-        throw new Error(`Cannot cast "${event}" before joining "${config.topic}"`);
-      }
-
-      channel.push(event, payload);
+      assertChannel(event, "cast").push(event, payload);
     },
   };
 
@@ -338,7 +433,36 @@ export function session<TValue = unknown>(
   };
 
   return {
-    ...sessionStore,
-    extend,
+    session: {
+      ...sessionStore,
+      extend,
+    },
+    attach(socket, attachConfig) {
+      attachment = {
+        socket,
+        topic: attachConfig.topic,
+      };
+      stopCurrentChannel();
+      stopCurrentChannel = () => {};
+      reset();
+      startChannel();
+    },
+    detach() {
+      attachment = null;
+      stopCurrentChannel();
+      stopCurrentChannel = () => {};
+      reset();
+    },
   };
+}
+
+export function session<TValue = unknown>(
+  socket: Pick<Socket, "channel">,
+  config: SessionConfig<TValue>,
+): Session<TValue> {
+  const { topic, ...deferredConfig } = config;
+  const deferred = defer<TValue>(deferredConfig);
+  deferred.attach(socket, { topic });
+
+  return deferred.session;
 }

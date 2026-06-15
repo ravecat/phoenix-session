@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { session as createSession } from "../src";
+import { session as createSession, defer } from "../src";
 import type { MockPush, MockSocket } from "./support/phoenix";
 import { Socket } from "./support/phoenix";
 
@@ -46,6 +46,98 @@ const testSession = (
     unsubscribe,
   };
 };
+
+describe("deferred session lifecycle", () => {
+  it("should expose initial loading state before attach", () => {
+    const deferred = defer<TestValue>({
+      value: { count: 1 },
+    });
+    let state: StoreStateOf<typeof deferred.session> | undefined;
+    const unsubscribe = deferred.session.subscribe((nextState) => {
+      state = nextState;
+    });
+
+    expect(state).toEqual({
+      value: { count: 1 },
+      status: "loading",
+      error: null,
+      processing: {},
+      errors: {},
+      timeouts: {},
+    });
+
+    unsubscribe();
+  });
+
+  it("should keep attach lazy until the session store is mounted", () => {
+    const socket = new Socket("/socket") as MockSocket;
+    const deferred = defer<TestValue>();
+
+    deferred.attach(socket, { topic: "counter:lobby" });
+
+    expect(socket.mockChannels).toHaveLength(0);
+
+    const unsubscribe = deferred.session.subscribe(() => {});
+
+    expect(socket.mockChannels).toHaveLength(1);
+    expect(socket.mockChannels[0]?.topic).toBe("counter:lobby");
+
+    unsubscribe();
+  });
+
+  it("should attach after subscription and join the channel", () => {
+    const socket = new Socket("/socket") as MockSocket;
+    const deferred = defer<TestValue>();
+    const unsubscribe = deferred.session.subscribe(() => {});
+
+    expect(socket.mockChannels).toHaveLength(0);
+
+    deferred.attach(socket, { topic: "counter:lobby" });
+
+    expect(socket.mockChannels).toHaveLength(1);
+    expect(socket.mockChannels[0]?.join).toHaveBeenCalledTimes(1);
+
+    unsubscribe();
+  });
+
+  it("should detach and reset to loading state with action buckets", () => {
+    const socket = new Socket("/socket") as MockSocket;
+    const deferred = defer<TestValue>({
+      value: { count: 1 },
+    });
+    const store = deferred.session.extend(({ call }) => ({
+      start() {
+        return call("server_start", {});
+      },
+    }));
+    let state: StoreStateOf<typeof store> | undefined;
+    const unsubscribe = store.subscribe((nextState) => {
+      state = nextState;
+    });
+
+    deferred.attach(socket, { topic: "counter:lobby" });
+    const channel = socket.mockChannels[0];
+    channel?.mockJoinPush.mockReply("ok");
+
+    expect(state).toMatchObject({
+      status: "ready",
+    });
+
+    deferred.detach();
+
+    expect(channel?.leave).toHaveBeenCalledTimes(1);
+    expect(state).toEqual({
+      value: { count: 1 },
+      status: "loading",
+      error: null,
+      processing: { start: false },
+      errors: { start: null },
+      timeouts: { start: false },
+    });
+
+    unsubscribe();
+  });
+});
 
 describe("session lifecycle", () => {
   it("should start loading without an initial value", () => {

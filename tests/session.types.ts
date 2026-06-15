@@ -1,5 +1,5 @@
 import type { Socket } from "phoenix";
-import { session } from "../src";
+import { defer, session } from "../src";
 
 type RoomValue = {
   started: boolean;
@@ -14,6 +14,31 @@ type StartError = {
 };
 
 declare const socket: Pick<Socket, "channel">;
+
+const deferredRoom = defer<RoomValue>({
+  value: { started: false },
+  connect: {
+    ok: (_value, reply: RoomValue) => reply,
+  },
+  events: {
+    projection: (_value, payload: RoomValue) => payload,
+  },
+});
+
+deferredRoom.attach(socket, { topic: "room:lobby" });
+deferredRoom.detach();
+
+const deferredActions = deferredRoom.session.extend(({ call }) => ({
+  start(payload: { mode: "solo" | "party" }) {
+    return call<StartOk, StartError>("start", payload);
+  },
+}));
+
+deferredActions.subscribe((state) => {
+  state.value?.started;
+  state.processing.start;
+  state.errors.start?.reason;
+});
 
 const room = session<RoomValue>(socket, {
   topic: "room:lobby",
