@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    "coverage/**",
+    "dist/**",
+    "node_modules/**",
+    ".direnv/**",
+    ".vite/**",
+    ".vitest/**"
+  ],
+  "overrides": [
+    {
+      "files": ["tests/**/*.types.ts"],
+      "rules": {
+        "no-unused-expressions": "off"
+      }
+    }
+  ]
+}

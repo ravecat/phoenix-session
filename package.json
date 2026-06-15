@@ -1,0 +1,62 @@
+{
+  "name": "phoenix-session",
+  "version": "1.0.0-beta.1",
+  "keywords": [
+    "channels",
+    "nanostores",
+    "phoenix",
+    "phoenix-channels",
+    "reactive",
+    "realtime",
+    "state",
+    "websocket"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ravecat/phoenix-session.git"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "check": "pnpm run lint && pnpm run format:check && pnpm run typecheck && pnpm run test",
+    "format": "eslint . --fix && oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "eslint . && oxlint . --deny-warnings",
+    "lint:fix": "eslint . --fix && oxlint . --fix --deny-warnings && oxfmt .",
+    "release": "semantic-release",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@types/phoenix": "^1.6.7",
+    "nanostores": "^1.0.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
+    "eslint": "^10.5.0",
+    "globals": "^17.6.0",
+    "oxfmt": "^0.54.0",
+    "oxlint": "^1.69.0",
+    "semantic-release": "25.0.3",
+    "semantic-release-run-when": "1.0.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.61.0",
+    "vitest": "^4.1.6"
+  },
+  "packageManager": "pnpm@10.26.2"
+}
