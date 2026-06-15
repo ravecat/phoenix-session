@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { session as createSession, defer } from "../src";
+import { session as createSession } from "../src";
 import type { MockPush, MockSocket } from "./support/phoenix";
 import { Socket } from "./support/phoenix";
 
@@ -47,13 +47,13 @@ const testSession = (
   };
 };
 
-describe("deferred session lifecycle", () => {
+describe("attachable session lifecycle", () => {
   it("should expose initial loading state before attach", () => {
-    const deferred = defer<TestValue>({
+    const store = createSession<TestValue>({
       value: { count: 1 },
     });
-    let state: StoreStateOf<typeof deferred.session> | undefined;
-    const unsubscribe = deferred.session.subscribe((nextState) => {
+    let state: StoreStateOf<typeof store> | undefined;
+    const unsubscribe = store.subscribe((nextState) => {
       state = nextState;
     });
 
@@ -71,13 +71,13 @@ describe("deferred session lifecycle", () => {
 
   it("should keep attach lazy until the session store is mounted", () => {
     const socket = new Socket("/socket") as MockSocket;
-    const deferred = defer<TestValue>();
+    const store = createSession<TestValue>();
 
-    deferred.attach(socket, { topic: "counter:lobby" });
+    store.attach(socket, { topic: "counter:lobby" });
 
     expect(socket.mockChannels).toHaveLength(0);
 
-    const unsubscribe = deferred.session.subscribe(() => {});
+    const unsubscribe = store.subscribe(() => {});
 
     expect(socket.mockChannels).toHaveLength(1);
     expect(socket.mockChannels[0]?.topic).toBe("counter:lobby");
@@ -87,12 +87,12 @@ describe("deferred session lifecycle", () => {
 
   it("should attach after subscription and join the channel", () => {
     const socket = new Socket("/socket") as MockSocket;
-    const deferred = defer<TestValue>();
-    const unsubscribe = deferred.session.subscribe(() => {});
+    const store = createSession<TestValue>();
+    const unsubscribe = store.subscribe(() => {});
 
     expect(socket.mockChannels).toHaveLength(0);
 
-    deferred.attach(socket, { topic: "counter:lobby" });
+    store.attach(socket, { topic: "counter:lobby" });
 
     expect(socket.mockChannels).toHaveLength(1);
     expect(socket.mockChannels[0]?.join).toHaveBeenCalledTimes(1);
@@ -102,10 +102,9 @@ describe("deferred session lifecycle", () => {
 
   it("should detach and reset to loading state with action buckets", () => {
     const socket = new Socket("/socket") as MockSocket;
-    const deferred = defer<TestValue>({
+    const store = createSession<TestValue>({
       value: { count: 1 },
-    });
-    const store = deferred.session.extend(({ call }) => ({
+    }).extend(({ call }) => ({
       start() {
         return call("server_start", {});
       },
@@ -115,7 +114,7 @@ describe("deferred session lifecycle", () => {
       state = nextState;
     });
 
-    deferred.attach(socket, { topic: "counter:lobby" });
+    store.attach(socket, { topic: "counter:lobby" });
     const channel = socket.mockChannels[0];
     channel?.mockJoinPush.mockReply("ok");
 
@@ -123,7 +122,7 @@ describe("deferred session lifecycle", () => {
       status: "ready",
     });
 
-    deferred.detach();
+    store.detach();
 
     expect(channel?.leave).toHaveBeenCalledTimes(1);
     expect(state).toEqual({
@@ -134,6 +133,86 @@ describe("deferred session lifecycle", () => {
       errors: { start: null },
       timeouts: { start: false },
     });
+
+    unsubscribe();
+  });
+
+  it("should no-op when attaching the same socket and topic", () => {
+    const socket = new Socket("/socket") as MockSocket;
+    const store = createSession<TestValue>(socket, {
+      topic: "counter:lobby",
+      value: { count: 1 },
+    });
+    const unsubscribe = store.subscribe(() => {});
+    const channel = socket.mockChannels[0];
+    channel?.mockJoinPush.mockReply("ok");
+
+    store.attach(socket, { topic: "counter:lobby" });
+
+    expect(socket.mockChannels).toHaveLength(1);
+    expect(channel?.leave).not.toHaveBeenCalled();
+
+    unsubscribe();
+  });
+
+  it("should reattach and reset state when the topic changes", () => {
+    const socket = new Socket("/socket") as MockSocket;
+    const store = createSession<TestValue>(socket, {
+      topic: "counter:lobby",
+      value: { count: 1 },
+      connect: {
+        ok: (_value, reply: TestValue) => reply,
+      },
+    }).extend(({ call }) => ({
+      start() {
+        return call("server_start", {});
+      },
+    }));
+    let state: StoreStateOf<typeof store> | undefined;
+    const unsubscribe = store.subscribe((nextState) => {
+      state = nextState;
+    });
+    const firstChannel = socket.mockChannels[0];
+    firstChannel?.mockJoinPush.mockReply("ok", { count: 9 });
+
+    expect(state).toMatchObject({
+      value: { count: 9 },
+      status: "ready",
+    });
+
+    store.attach(socket, { topic: "counter:other" });
+
+    expect(firstChannel?.leave).toHaveBeenCalledTimes(1);
+    expect(socket.mockChannels).toHaveLength(2);
+    expect(socket.mockChannels[1]?.topic).toBe("counter:other");
+    expect(state).toEqual({
+      value: { count: 1 },
+      status: "loading",
+      error: null,
+      processing: { start: false },
+      errors: { start: null },
+      timeouts: { start: false },
+    });
+
+    unsubscribe();
+  });
+
+  it("should expose lifecycle methods on extended sessions", () => {
+    const socket = new Socket("/socket") as MockSocket;
+    const store = createSession<TestValue>().extend(({ call }) => ({
+      start() {
+        return call("server_start", {});
+      },
+    }));
+    const unsubscribe = store.subscribe(() => {});
+
+    store.attach(socket, { topic: "counter:lobby" });
+
+    expect(socket.mockChannels).toHaveLength(1);
+
+    store.detach();
+
+    expect(socket.mockChannels[0]?.leave).toHaveBeenCalledTimes(1);
 
     unsubscribe();
   });

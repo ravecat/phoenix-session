@@ -1,5 +1,5 @@
 import type { Socket } from "phoenix";
-import { defer, session } from "../src";
+import { session } from "../src";
 
 type RoomValue = {
   started: boolean;
@@ -13,9 +13,9 @@ type StartError = {
   reason?: string;
 };
 
-declare const socket: Pick<Socket, "channel">;
+declare const socket: Socket;
 
-const deferredRoom = defer<RoomValue>({
+const lazyRoom = session<RoomValue>({
   value: { started: false },
   connect: {
     ok: (_value, reply: RoomValue) => reply,
@@ -25,16 +25,26 @@ const deferredRoom = defer<RoomValue>({
   },
 });
 
-deferredRoom.attach(socket, { topic: "room:lobby" });
-deferredRoom.detach();
+lazyRoom.attach(socket, { topic: "room:lobby" });
+lazyRoom.detach();
 
-const deferredActions = deferredRoom.session.extend(({ call }) => ({
+const lazyActions = lazyRoom.extend(({ call }) => ({
   start(payload: { mode: "solo" | "party" }) {
     return call<StartOk, StartError>("start", payload);
   },
 }));
 
-deferredActions.subscribe((state) => {
+lazyActions.attach(socket, { topic: "room:lobby" });
+lazyActions.detach();
+const chainedActions = lazyActions.extend(({ cast }) => ({
+  stop() {
+    cast("stop", {});
+  },
+}));
+chainedActions.start({ mode: "party" });
+chainedActions.stop();
+
+lazyActions.subscribe((state) => {
   state.value?.started;
   state.processing.start;
   state.errors.start?.reason;
@@ -59,6 +69,8 @@ const room = session<RoomValue>(socket, {
 
 const startCall = room.start({ mode: "solo" });
 room.stop();
+room.attach(socket, { topic: "room:lobby" });
+room.detach();
 
 startCall.receive("ok", (reply) => {
   reply.accepted;
@@ -100,7 +112,7 @@ room.start();
 // @ts-expect-error stop has no payload
 room.stop({});
 
-// @ts-expect-error extended store exposes only subscribe and action methods
+// @ts-expect-error extended store does not expose low-level push
 room.push("dynamic_event", {});
 
 // @ts-expect-error extended store does not expose action context call

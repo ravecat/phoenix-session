@@ -80,14 +80,15 @@ type SessionStore<TValue, TActions extends Record<string, unknown>> = ReadableSt
   SessionState<TValue, TActions>
 >;
 
-type SessionConfig<TValue> = {
-  topic: string;
+type SessionOptions<TValue> = {
   value?: TValue | null;
   connect?: ConnectConfig<TValue>;
   events?: EventReducers<TValue>;
 };
 
-type DeferredSessionConfig<TValue> = Omit<SessionConfig<TValue>, "topic">;
+type SessionConfig<TValue> = SessionOptions<TValue> & {
+  topic: string;
+};
 
 type SessionAttachConfig = {
   topic: string;
@@ -102,23 +103,33 @@ type SessionActionContext = {
   cast(event: string, payload: object): void;
 };
 
-type Session<TValue> = SessionStore<TValue, NoActions> & {
-  extend<TExtension extends object>(
-    defineExtension: (session: SessionActionContext) => TExtension,
-  ): SessionStore<TValue, ExtensionActionsOf<TExtension>> & TExtension;
-};
+type Session<
+  TValue,
+  TActions extends Record<string, unknown> = NoActions,
+  TExtensionState extends object = Record<never, never>,
+> = SessionStore<TValue, TActions> &
+  TExtensionState & {
+    attach(socket: Socket, config: SessionAttachConfig): void;
+    detach(): void;
+    extend<TExtension extends object>(
+      defineExtension: (session: SessionActionContext) => TExtension,
+    ): Session<TValue, TActions & ExtensionActionsOf<TExtension>, TExtensionState & TExtension>;
+  };
 
-type DeferredSession<TValue> = {
-  readonly session: Session<TValue>;
-  attach(socket: Pick<Socket, "channel">, config: SessionAttachConfig): void;
-  detach(): void;
-};
-
-export function defer<TValue = unknown>(
-  config: DeferredSessionConfig<TValue> = {},
-): DeferredSession<TValue> {
+export function session<TValue = unknown>(config?: SessionOptions<TValue>): Session<TValue>;
+export function session<TValue = unknown>(
+  socket: Socket,
+  config: SessionConfig<TValue>,
+): Session<TValue>;
+export function session<TValue = unknown>(
+  socketOrConfig: Socket | SessionOptions<TValue> = {},
+  attachedConfig?: SessionConfig<TValue>,
+): Session<TValue> {
+  const config = (attachedConfig ?? socketOrConfig) as SessionOptions<TValue>;
   let channel: Channel | null = null;
-  let attachment: { socket: Pick<Socket, "channel">; topic: string } | null = null;
+  let attachment: { socket: Socket; topic: string } | null = attachedConfig
+    ? { socket: socketOrConfig as Socket, topic: attachedConfig.topic }
+    : null;
   let mounted = false;
   let stopCurrentChannel = () => {};
   let activeActionName: string | null = null;
@@ -365,10 +376,6 @@ export function defer<TValue = unknown>(
     listener: (value: SessionState<TValue, TActions>) => void,
   ) => $state.subscribe(listener as (value: SessionState<TValue, RuntimeActions>) => void);
 
-  const sessionStore: SessionStore<TValue, NoActions> = {
-    subscribe: (listener) => subscribe<NoActions>(listener),
-  };
-
   const actionContext: SessionActionContext = {
     call: <TOk = unknown, TError = unknown>(event: string, payload: object, timeout?: number) => {
       const call = assertChannel(event, "call").push(event, payload, timeout) as ActionCall<
@@ -408,61 +415,66 @@ export function defer<TValue = unknown>(
     },
   };
 
-  const extend = <TExtension extends object>(
-    defineExtension: (session: SessionActionContext) => TExtension,
-  ): SessionStore<TValue, ExtensionActionsOf<TExtension>> & TExtension => {
-    const extension = defineExtension(actionContext);
-    const wrappedExtension = { ...extension } as Record<string, unknown>;
-
-    for (const [action, value] of Object.entries(extension)) {
-      if (typeof value !== "function") {
-        continue;
-      }
-
-      registerAction(action);
-
-      wrappedExtension[action] = function (this: unknown, ...args: unknown[]) {
-        return runAction(action, () => value.apply(this, args));
-      };
+  const attach = (socket: Socket, attachConfig: SessionAttachConfig) => {
+    if (attachment?.socket === socket && attachment.topic === attachConfig.topic) {
+      return;
     }
 
-    return {
-      ...(wrappedExtension as typeof extension),
-      subscribe: (listener) => subscribe<ExtensionActionsOf<TExtension>>(listener),
+    stopCurrentChannel();
+    stopCurrentChannel = () => {};
+    attachment = {
+      socket,
+      topic: attachConfig.topic,
     };
+    reset();
+    startChannel();
   };
 
-  return {
-    session: {
-      ...sessionStore,
-      extend,
-    },
-    attach(socket, attachConfig) {
-      attachment = {
-        socket,
-        topic: attachConfig.topic,
-      };
-      stopCurrentChannel();
-      stopCurrentChannel = () => {};
-      reset();
-      startChannel();
-    },
-    detach() {
-      attachment = null;
-      stopCurrentChannel();
-      stopCurrentChannel = () => {};
-      reset();
-    },
+  const detach = () => {
+    attachment = null;
+    stopCurrentChannel();
+    stopCurrentChannel = () => {};
+    reset();
   };
-}
 
-export function session<TValue = unknown>(
-  socket: Pick<Socket, "channel">,
-  config: SessionConfig<TValue>,
-): Session<TValue> {
-  const { topic, ...deferredConfig } = config;
-  const deferred = defer<TValue>(deferredConfig);
-  deferred.attach(socket, { topic });
+  const createSessionObject = <
+    TActions extends Record<string, unknown>,
+    TExtensionState extends object,
+  >(
+    extensionState: TExtensionState,
+  ): Session<TValue, TActions, TExtensionState> =>
+    ({
+      ...extensionState,
+      subscribe: (listener) => subscribe<TActions>(listener),
+      attach,
+      detach,
+      extend<TExtension extends object>(
+        defineExtension: (session: SessionActionContext) => TExtension,
+      ) {
+        const extension = defineExtension(actionContext);
+        const wrappedExtension = { ...extension } as Record<string, unknown>;
 
-  return deferred.session;
+        for (const [action, value] of Object.entries(extension)) {
+          if (typeof value !== "function") {
+            continue;
+          }
+
+          registerAction(action);
+
+          wrappedExtension[action] = function (this: unknown, ...args: unknown[]) {
+            return runAction(action, () => value.apply(this, args));
+          };
+        }
+
+        return createSessionObject<
+          TActions & ExtensionActionsOf<TExtension>,
+          TExtensionState & TExtension
+        >({
+          ...extensionState,
+          ...(wrappedExtension as TExtension),
+        });
+      },
+    }) as Session<TValue, TActions, TExtensionState>;
+
+  return createSessionObject<NoActions, Record<never, never>>({});
 }

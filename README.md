@@ -2,7 +2,7 @@
 
 `phoenix-session` transforms a Phoenix [Channel](https://hexdocs.pm/phoenix/js/#channel) instance into a reactive store for channel state and outgoing messages.
 
-> `phoenix-session` was renamed to `phoenix-session`. Existing users can migrate by changing the package name in their dependency manifest and import paths.
+> `@rvct/phoenix` was renamed to `phoenix-session`. Existing users can migrate by changing the package name in their dependency manifest and import paths.
 
 ## Contents
 
@@ -150,39 +150,37 @@ const chat = session<ChatValue>(socket, {
 });
 ```
 
-## Deferred sessions
+## Lazy transport attachment
 
-Use `session(socket, config)` when the socket and topic are known when the store is created. Use `defer(config)` when an adapter must return a store synchronously and discover the socket or topic later.
+Use `session(socket, config)` when the socket and topic are known when the store is created. Use `session(config)` when an adapter must return a store synchronously and discover the socket or topic later.
 
 ```ts
-import { defer } from "phoenix-session";
+import { session } from "phoenix-session";
 
 type ChatValue = {
   messages: Array<{ id: string; body: string; insertedAt: string }>;
 };
 
-const chatController = defer<ChatValue>({
+const chat = session<ChatValue>({
   value: {
     messages: [],
   },
 });
-
-export const chat = chatController.session;
 
 chat.subscribe((state) => {
   console.log(state.status, state.value);
 });
 
 // Later, after bootstrap or routing resolves the transport.
-chatController.attach(socket, {
+chat.attach(socket, {
   topic: "chat:lobby",
 });
 
 // During cleanup.
-chatController.detach();
+chat.detach();
 ```
 
-The returned `session` is the same Phoenix-compatible store shape as `session(socket, config)`. The controller methods are for runtime adapters that own transport setup; UI code should usually receive and subscribe to the session store only.
+The returned session is a readable store and lifecycle owner. UI code should usually subscribe to the store and call named action methods; bootstrap or adapter code should own `attach(...)` and `detach()`.
 
 ## Join replies
 
